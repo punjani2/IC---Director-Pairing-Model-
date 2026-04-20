@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from streamlit_gsheets import GSheetsConnection
+import gspread
+from google.oauth2.service_account import Credentials
 from datetime import datetime, timezone
 
 EXCEL_FILE = "Anushil_Organization_Skip_Level_Pairings_v4.xlsx"
@@ -78,11 +79,79 @@ hr {
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Pairing workbook ----------
+# ---------- Config from Streamlit secrets ----------
+GSHEET_URL = st.secrets["connections"]["gsheets"]["spreadsheet"]
+UPDATES_WORKSHEET = "updates"
+
+def get_gspread_client():
+    info = {
+        "type": st.secrets["connections"]["gsheets"]["type"],
+        "project_id": st.secrets["connections"]["gsheets"]["project_id"],
+        "private_key_id": st.secrets["connections"]["gsheets"]["private_key_id"],
+        "private_key": st.secrets["connections"]["gsheets"]["private_key"],
+        "client_email": st.secrets["connections"]["gsheets"]["client_email"],
+        "client_id": st.secrets["connections"]["gsheets"]["client_id"],
+        "auth_uri": st.secrets["connections"]["gsheets"]["auth_uri"],
+        "token_uri": st.secrets["connections"]["gsheets"]["token_uri"],
+        "auth_provider_x509_cert_url": st.secrets["connections"]["gsheets"]["auth_provider_x509_cert_url"],
+        "client_x509_cert_url": st.secrets["connections"]["gsheets"]["client_x509_cert_url"],
+    }
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    return gspread.authorize(creds)
+
+def get_updates_worksheet():
+    client = get_gspread_client()
+    spreadsheet = client.open_by_url(GSHEET_URL)
+    return spreadsheet.worksheet(UPDATES_WORKSHEET)
+
+def load_updates() -> pd.DataFrame:
+    try:
+        ws = get_updates_worksheet()
+        records = ws.get_all_records()
+        if not records:
+            return pd.DataFrame(columns=["row_key", "model", "status", "comments", "last_updated"])
+        df = pd.DataFrame(records)
+        for col in ["row_key", "model", "status", "comments", "last_updated"]:
+            if col not in df.columns:
+                df[col] = ""
+        return df[["row_key", "model", "status", "comments", "last_updated"]].copy()
+    except Exception as e:
+        st.error("Failed to read updates sheet.")
+        st.exception(e)
+        return pd.DataFrame(columns=["row_key", "model", "status", "comments", "last_updated"])
+
+def save_updates(df_updates: pd.DataFrame) -> None:
+    ws = get_updates_worksheet()
+    df_updates = df_updates.fillna("")
+    data = [df_updates.columns.tolist()] + df_updates.astype(str).values.tolist()
+    ws.clear()
+    ws.update("A1", data)
+
+def upsert_updates(model_name: str, edited_df: pd.DataFrame) -> None:
+    updates = load_updates()
+
+    existing_other_models = updates[updates["model"] != model_name].copy()
+
+    current_model_updates = edited_df[["row_key", "Status", "Comments"]].copy()
+    current_model_updates = current_model_updates.rename(
+        columns={"Status": "status", "Comments": "comments"}
+    )
+    current_model_updates["model"] = model_name
+    current_model_updates["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+    merged = pd.concat([existing_other_models, current_model_updates], ignore_index=True)
+    merged = merged.drop_duplicates(subset=["model", "row_key"], keep="last")
+    save_updates(merged)
+
+# ---------- Load pairing data ----------
 df_11 = pd.read_excel(EXCEL_FILE, sheet_name="Q1 1-1 Allowed Dir Only")
 df_12 = pd.read_excel(EXCEL_FILE, sheet_name="Q1 1-2 Allowed Dir Only")
 
-# ---------- Remove rows you don't want in the app ----------
 REMOVE_PATTERNS = [
     "full stack developer intern",
     "sales product line intern",
@@ -101,7 +170,6 @@ df_12 = df_12[
     & ~should_remove(df_12["IC2 Name"])
 ].copy()
 
-# ---------- Fill blank IC team from IC title ----------
 df_11["IC Team"] = df_11["IC Team"].fillna("").astype(str).str.strip()
 df_11.loc[df_11["IC Team"] == "", "IC Team"] = df_11["IC Title"]
 
@@ -110,62 +178,6 @@ for prefix in ["IC1", "IC2"]:
     df_12.loc[df_12[f"{prefix} Team"] == "", f"{prefix} Team"] = df_12[f"{prefix} Title"]
 
 STATUS_OPTIONS = ["", "Scheduled", "Done", "Cancelled"]
-
-# ---------- Google Sheets connection ----------
-conn = st.connection("gsheets", type=GSheetsConnection)
-
-UPDATES_WORKSHEET = "updates"
-
-def load_updates() -> pd.DataFrame:
-    try:
-        df = conn.read(worksheet=UPDATES_WORKSHEET, ttl=0)
-        if df is None or df.empty:
-            return pd.DataFrame(columns=["row_key", "model", "status", "comments", "last_updated"])
-        for col in ["row_key", "model", "status", "comments", "last_updated"]:
-            if col not in df.columns:
-                df[col] = ""
-        return df[["row_key", "model", "status", "comments", "last_updated"]].copy()
-    except Exception:
-        # If worksheet is empty or not created yet, start fresh
-        return pd.DataFrame(columns=["row_key", "model", "status", "comments", "last_updated"])
-
-def save_updates(df_updates: pd.DataFrame) -> None:
-    # update() writes the whole worksheet content
-    conn.update(worksheet=UPDATES_WORKSHEET, data=df_updates)
-
-def upsert_updates(model_name: str, edited_df: pd.DataFrame) -> None:
-    updates = load_updates()
-
-    existing_other_models = updates[updates["model"] != model_name].copy()
-
-    current_model_updates = edited_df[["row_key", "Status", "Comments"]].copy()
-    current_model_updates = current_model_updates.rename(
-        columns={"Status": "status", "Comments": "comments"}
-    )
-    current_model_updates["model"] = model_name
-    current_model_updates["last_updated"] = datetime.now(timezone.utc).isoformat()
-
-    merged = pd.concat([existing_other_models, current_model_updates], ignore_index=True)
-    merged = merged.drop_duplicates(subset=["model", "row_key"], keep="last")
-    save_updates(merged)
-
-def merge_updates(results: pd.DataFrame, model_name: str) -> pd.DataFrame:
-    updates = load_updates()
-    updates_model = updates[updates["model"] == model_name].copy()
-    if updates_model.empty:
-        results["Comments"] = ""
-        results["Status"] = ""
-        return results
-
-    results = results.merge(
-        updates_model[["row_key", "status", "comments"]],
-        on="row_key",
-        how="left",
-    )
-    results["Comments"] = results["comments"].fillna("")
-    results["Status"] = results["status"].fillna("")
-    results = results.drop(columns=["status", "comments"], errors="ignore")
-    return results
 
 # ---------- Header ----------
 st.markdown('<div class="main-title">Cross-functional Skip-Level Meeting Pairings</div>', unsafe_allow_html=True)
@@ -186,7 +198,24 @@ with col2:
 
 st.markdown("---")
 
-# ---------- Helpers ----------
+def merge_updates(results: pd.DataFrame, model_name: str) -> pd.DataFrame:
+    updates = load_updates()
+    updates_model = updates[updates["model"] == model_name].copy()
+    if updates_model.empty:
+        results["Comments"] = ""
+        results["Status"] = ""
+        return results
+
+    results = results.merge(
+        updates_model[["row_key", "status", "comments"]],
+        on="row_key",
+        how="left",
+    )
+    results["Comments"] = results["comments"].fillna("")
+    results["Status"] = results["status"].fillna("")
+    results = results.drop(columns=["status", "comments"], errors="ignore")
+    return results
+
 def add_edit_columns_11(results: pd.DataFrame) -> pd.DataFrame:
     results = results.copy()
     results["row_key"] = (
@@ -224,24 +253,12 @@ def show_progress_dashboard_11():
     base = merge_updates(base, "1:1")
     statuses = base["Status"].fillna("")
 
-    total = len(base)
-    scheduled = int((statuses == "Scheduled").sum())
-    done = int((statuses == "Done").sum())
-    cancelled = int((statuses == "Cancelled").sum())
-    blank = int((statuses == "").sum())
-
-    st.subheader("Progress Dashboard")
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        metric_box("Total Meetings", total)
-    with c2:
-        metric_box("Scheduled", scheduled)
-    with c3:
-        metric_box("Done", done)
-    with c4:
-        metric_box("Cancelled", cancelled)
-    with c5:
-        metric_box("Blank", blank)
+    with c1: metric_box("Total Meetings", len(base))
+    with c2: metric_box("Scheduled", int((statuses == "Scheduled").sum()))
+    with c3: metric_box("Done", int((statuses == "Done").sum()))
+    with c4: metric_box("Cancelled", int((statuses == "Cancelled").sum()))
+    with c5: metric_box("Blank", int((statuses == "").sum()))
 
 def show_progress_dashboard_12():
     base = df_12.copy()
@@ -253,26 +270,14 @@ def show_progress_dashboard_12():
     base = merge_updates(base, "1:2")
     statuses = base["Status"].fillna("")
 
-    total = len(base)
-    scheduled = int((statuses == "Scheduled").sum())
-    done = int((statuses == "Done").sum())
-    cancelled = int((statuses == "Cancelled").sum())
-    blank = int((statuses == "").sum())
-
-    st.subheader("Progress Dashboard")
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        metric_box("Total Meetings", total)
-    with c2:
-        metric_box("Scheduled", scheduled)
-    with c3:
-        metric_box("Done", done)
-    with c4:
-        metric_box("Cancelled", cancelled)
-    with c5:
-        metric_box("Blank", blank)
+    with c1: metric_box("Total Meetings", len(base))
+    with c2: metric_box("Scheduled", int((statuses == "Scheduled").sum()))
+    with c3: metric_box("Done", int((statuses == "Done").sum()))
+    with c4: metric_box("Cancelled", int((statuses == "Cancelled").sum()))
+    with c5: metric_box("Blank", int((statuses == "").sum()))
 
-# ---------- Dashboard ----------
+st.subheader("Progress Dashboard")
 if model == "1:1 Model":
     show_progress_dashboard_11()
 else:
@@ -281,7 +286,6 @@ else:
 st.markdown("---")
 st.subheader("Pairing Results")
 
-# ---------- Results ----------
 if name:
     if model == "1:1 Model":
         results = df_11[
@@ -295,14 +299,9 @@ if name:
             results = add_edit_columns_11(results)
 
             display_cols = [
-                "Director Name",
-                "Director Title",
-                "Director Team",
-                "IC Name",
-                "IC Title",
-                "IC Team",
-                "Comments",
-                "Status",
+                "Director Name", "Director Title", "Director Team",
+                "IC Name", "IC Title", "IC Team",
+                "Comments", "Status",
             ]
 
             edited = st.data_editor(
@@ -310,13 +309,8 @@ if name:
                 hide_index=True,
                 use_container_width=True,
                 disabled=[
-                    "Director Name",
-                    "Director Title",
-                    "Director Team",
-                    "IC Name",
-                    "IC Title",
-                    "IC Team",
-                    "row_key",
+                    "Director Name", "Director Title", "Director Team",
+                    "IC Name", "IC Title", "IC Team", "row_key",
                 ],
                 column_config={
                     "Comments": st.column_config.TextColumn("Comments"),
@@ -332,15 +326,7 @@ if name:
 
             if st.button("Save 1:1 updates"):
                 upsert_updates("1:1", edited)
-                st.success("Saved.")
-
-            export_df = edited.drop(columns=["row_key"])
-            st.download_button(
-                "Download current 1:1 results as CSV",
-                export_df.to_csv(index=False).encode("utf-8"),
-                file_name="skip_level_pairings_1_1.csv",
-                mime="text/csv",
-            )
+                st.success("Saved. Refresh if you want to confirm dashboard totals immediately.")
 
     else:
         results = df_12[
@@ -355,17 +341,10 @@ if name:
             results = add_edit_columns_12(results)
 
             display_cols = [
-                "Director Name",
-                "Director Title",
-                "Director Team",
-                "IC1 Name",
-                "IC1 Title",
-                "IC1 Team",
-                "IC2 Name",
-                "IC2 Title",
-                "IC2 Team",
-                "Comments",
-                "Status",
+                "Director Name", "Director Title", "Director Team",
+                "IC1 Name", "IC1 Title", "IC1 Team",
+                "IC2 Name", "IC2 Title", "IC2 Team",
+                "Comments", "Status",
             ]
 
             edited = st.data_editor(
@@ -373,15 +352,9 @@ if name:
                 hide_index=True,
                 use_container_width=True,
                 disabled=[
-                    "Director Name",
-                    "Director Title",
-                    "Director Team",
-                    "IC1 Name",
-                    "IC1 Title",
-                    "IC1 Team",
-                    "IC2 Name",
-                    "IC2 Title",
-                    "IC2 Team",
+                    "Director Name", "Director Title", "Director Team",
+                    "IC1 Name", "IC1 Title", "IC1 Team",
+                    "IC2 Name", "IC2 Title", "IC2 Team",
                     "row_key",
                 ],
                 column_config={
@@ -398,14 +371,6 @@ if name:
 
             if st.button("Save 1:2 updates"):
                 upsert_updates("1:2", edited)
-                st.success("Saved.")
-
-            export_df = edited.drop(columns=["row_key"])
-            st.download_button(
-                "Download current 1:2 results as CSV",
-                export_df.to_csv(index=False).encode("utf-8"),
-                file_name="skip_level_pairings_1_2.csv",
-                mime="text/csv",
-            )
+                st.success("Saved. Refresh if you want to confirm dashboard totals immediately.")
 else:
     st.info("Search for an employee name to view their pairing details.")
