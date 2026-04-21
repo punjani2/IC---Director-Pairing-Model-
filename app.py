@@ -198,6 +198,7 @@ with col2:
 
 st.markdown("---")
 
+# ---------- Helpers ----------
 def merge_updates(results: pd.DataFrame, model_name: str) -> pd.DataFrame:
     updates = load_updates()
     updates_model = updates[updates["model"] == model_name].copy()
@@ -254,11 +255,16 @@ def show_progress_dashboard_11():
     statuses = base["Status"].fillna("")
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: metric_box("Total Meetings", len(base))
-    with c2: metric_box("Scheduled", int((statuses == "Scheduled").sum()))
-    with c3: metric_box("Done", int((statuses == "Done").sum()))
-    with c4: metric_box("Cancelled", int((statuses == "Cancelled").sum()))
-    with c5: metric_box("Blank", int((statuses == "").sum()))
+    with c1:
+        metric_box("Total Meetings", len(base))
+    with c2:
+        metric_box("Scheduled", int((statuses == "Scheduled").sum()))
+    with c3:
+        metric_box("Done", int((statuses == "Done").sum()))
+    with c4:
+        metric_box("Cancelled", int((statuses == "Cancelled").sum()))
+    with c5:
+        metric_box("Blank", int((statuses == "").sum()))
 
 def show_progress_dashboard_12():
     base = df_12.copy()
@@ -271,11 +277,16 @@ def show_progress_dashboard_12():
     statuses = base["Status"].fillna("")
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: metric_box("Total Meetings", len(base))
-    with c2: metric_box("Scheduled", int((statuses == "Scheduled").sum()))
-    with c3: metric_box("Done", int((statuses == "Done").sum()))
-    with c4: metric_box("Cancelled", int((statuses == "Cancelled").sum()))
-    with c5: metric_box("Blank", int((statuses == "").sum()))
+    with c1:
+        metric_box("Total Meetings", len(base))
+    with c2:
+        metric_box("Scheduled", int((statuses == "Scheduled").sum()))
+    with c3:
+        metric_box("Done", int((statuses == "Done").sum()))
+    with c4:
+        metric_box("Cancelled", int((statuses == "Cancelled").sum()))
+    with c5:
+        metric_box("Blank", int((statuses == "").sum()))
 
 st.subheader("Progress Dashboard")
 if model == "1:1 Model":
@@ -286,6 +297,7 @@ else:
 st.markdown("---")
 st.subheader("Pairing Results")
 
+# ---------- Results ----------
 if name:
     if model == "1:1 Model":
         results = df_11[
@@ -299,9 +311,14 @@ if name:
             results = add_edit_columns_11(results)
 
             display_cols = [
-                "Director Name", "Director Title", "Director Team",
-                "IC Name", "IC Title", "IC Team",
-                "Comments", "Status",
+                "Director Name",
+                "Director Title",
+                "Director Team",
+                "IC Name",
+                "IC Title",
+                "IC Team",
+                "Comments",
+                "Status",
             ]
 
             edited = st.data_editor(
@@ -309,8 +326,13 @@ if name:
                 hide_index=True,
                 use_container_width=True,
                 disabled=[
-                    "Director Name", "Director Title", "Director Team",
-                    "IC Name", "IC Title", "IC Team", "row_key",
+                    "Director Name",
+                    "Director Title",
+                    "Director Team",
+                    "IC Name",
+                    "IC Title",
+                    "IC Team",
+                    "row_key",
                 ],
                 column_config={
                     "Comments": st.column_config.TextColumn("Comments"),
@@ -326,7 +348,16 @@ if name:
 
             if st.button("Save 1:1 updates"):
                 upsert_updates("1:1", edited)
-                st.success("Saved. Refresh if you want to confirm dashboard totals immediately.")
+                st.success("Saved.")
+                st.rerun()
+
+            export_df = edited.drop(columns=["row_key"])
+            st.download_button(
+                "Download current 1:1 results as CSV",
+                export_df.to_csv(index=False).encode("utf-8"),
+                file_name="skip_level_pairings_1_1.csv",
+                mime="text/csv",
+            )
 
     else:
         results = df_12[
@@ -341,10 +372,17 @@ if name:
             results = add_edit_columns_12(results)
 
             display_cols = [
-                "Director Name", "Director Title", "Director Team",
-                "IC1 Name", "IC1 Title", "IC1 Team",
-                "IC2 Name", "IC2 Title", "IC2 Team",
-                "Comments", "Status",
+                "Director Name",
+                "Director Title",
+                "Director Team",
+                "IC1 Name",
+                "IC1 Title",
+                "IC1 Team",
+                "IC2 Name",
+                "IC2 Title",
+                "IC2 Team",
+                "Comments",
+                "Status",
             ]
 
             edited = st.data_editor(
@@ -352,9 +390,15 @@ if name:
                 hide_index=True,
                 use_container_width=True,
                 disabled=[
-                    "Director Name", "Director Title", "Director Team",
-                    "IC1 Name", "IC1 Title", "IC1 Team",
-                    "IC2 Name", "IC2 Title", "IC2 Team",
+                    "Director Name",
+                    "Director Title",
+                    "Director Team",
+                    "IC1 Name",
+                    "IC1 Title",
+                    "IC1 Team",
+                    "IC2 Name",
+                    "IC2 Title",
+                    "IC2 Team",
                     "row_key",
                 ],
                 column_config={
@@ -371,6 +415,15 @@ if name:
 
             if st.button("Save 1:2 updates"):
                 upsert_updates("1:2", edited)
-                st.success("Saved. Refresh if you want to confirm dashboard totals immediately.")
+                st.success("Saved.")
+                st.rerun()
+
+            export_df = edited.drop(columns=["row_key"])
+            st.download_button(
+                "Download current 1:2 results as CSV",
+                export_df.to_csv(index=False).encode("utf-8"),
+                file_name="skip_level_pairings_1_2.csv",
+                mime="text/csv",
+            )
 else:
     st.info("Search for an employee name to view their pairing details.")
