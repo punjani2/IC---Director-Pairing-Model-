@@ -142,16 +142,27 @@ def get_updates_store() -> pd.DataFrame:
             )
     return st.session_state["updates_store"]
 
-def replace_model_updates(model_name: str, edited_df: pd.DataFrame) -> None:
+def upsert_partial_updates(model_name: str, edited_df: pd.DataFrame) -> None:
+    """
+    Update only the rows currently visible/edited.
+    Keep all previously saved rows for the same model that are not in this filtered view.
+    """
     updates = get_updates_store().copy()
-    other_models = updates[updates["model"] != model_name].copy()
 
-    current = edited_df[["row_key", "Status", "Comments"]].copy()
-    current = current.rename(columns={"Status": "status", "Comments": "comments"})
-    current["model"] = model_name
-    current["last_updated"] = datetime.now(timezone.utc).isoformat()
+    edited_subset = edited_df[["row_key", "Status", "Comments"]].copy()
+    edited_subset = edited_subset.rename(columns={"Status": "status", "Comments": "comments"})
+    edited_subset["model"] = model_name
+    edited_subset["last_updated"] = datetime.now(timezone.utc).isoformat()
 
-    merged = pd.concat([other_models, current], ignore_index=True)
+    # Remove only rows that are being updated right now
+    edited_keys = set(edited_subset["row_key"].astype(str).tolist())
+    keep_mask = ~(
+        (updates["model"] == model_name) &
+        (updates["row_key"].astype(str).isin(edited_keys))
+    )
+    remaining = updates[keep_mask].copy()
+
+    merged = pd.concat([remaining, edited_subset], ignore_index=True)
     merged = merged.drop_duplicates(subset=["model", "row_key"], keep="last")
 
     st.session_state["updates_store"] = merged
@@ -361,7 +372,7 @@ if name:
 
             with action_col1:
                 if st.button("Save 1:1 updates", use_container_width=True):
-                    replace_model_updates("1:1", edited)
+                    upsert_partial_updates("1:1", edited)
                     st.success("Saved.")
                     st.rerun()
 
@@ -433,7 +444,7 @@ if name:
 
             with action_col1:
                 if st.button("Save 1:2 updates", use_container_width=True):
-                    replace_model_updates("1:2", edited)
+                    upsert_partial_updates("1:2", edited)
                     st.success("Saved.")
                     st.rerun()
 
