@@ -5,6 +5,7 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, timezone
 
 EXCEL_FILE = "Anushil_Organization_Skip_Level_Pairings_v4.xlsx"
+UPDATES_WORKSHEET = "updates"
 
 st.set_page_config(
     page_title="Cross-functional Skip-Level Meeting Pairings",
@@ -81,8 +82,8 @@ hr {
 
 # ---------- Config from Streamlit secrets ----------
 GSHEET_URL = st.secrets["connections"]["gsheets"]["spreadsheet"]
-UPDATES_WORKSHEET = "updates"
 
+@st.cache_resource
 def get_gspread_client():
     info = {
         "type": st.secrets["connections"]["gsheets"]["type"],
@@ -96,7 +97,6 @@ def get_gspread_client():
         "auth_provider_x509_cert_url": st.secrets["connections"]["gsheets"]["auth_provider_x509_cert_url"],
         "client_x509_cert_url": st.secrets["connections"]["gsheets"]["client_x509_cert_url"],
     }
-
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -104,53 +104,66 @@ def get_gspread_client():
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
 
+@st.cache_resource
 def get_updates_worksheet():
     client = get_gspread_client()
     spreadsheet = client.open_by_url(GSHEET_URL)
     return spreadsheet.worksheet(UPDATES_WORKSHEET)
 
-def load_updates() -> pd.DataFrame:
-    try:
-        ws = get_updates_worksheet()
-        records = ws.get_all_records()
-        if not records:
-            return pd.DataFrame(columns=["row_key", "model", "status", "comments", "last_updated"])
-        df = pd.DataFrame(records)
-        for col in ["row_key", "model", "status", "comments", "last_updated"]:
-            if col not in df.columns:
-                df[col] = ""
-        return df[["row_key", "model", "status", "comments", "last_updated"]].copy()
-    except Exception as e:
-        st.error("Failed to read updates sheet.")
-        st.exception(e)
+@st.cache_data(ttl=30)
+def load_updates_from_gsheet():
+    ws = get_updates_worksheet()
+    records = ws.get_all_records()
+    if not records:
         return pd.DataFrame(columns=["row_key", "model", "status", "comments", "last_updated"])
+    df = pd.DataFrame(records)
+    for col in ["row_key", "model", "status", "comments", "last_updated"]:
+        if col not in df.columns:
+            df[col] = ""
+    return df[["row_key", "model", "status", "comments", "last_updated"]].copy()
 
-def save_updates(df_updates: pd.DataFrame) -> None:
+def save_updates_to_gsheet(df_updates: pd.DataFrame) -> None:
     ws = get_updates_worksheet()
     df_updates = df_updates.fillna("")
     data = [df_updates.columns.tolist()] + df_updates.astype(str).values.tolist()
     ws.clear()
     ws.update("A1", data)
+    load_updates_from_gsheet.clear()
 
-def upsert_updates(model_name: str, edited_df: pd.DataFrame) -> None:
-    updates = load_updates()
+def get_updates_store() -> pd.DataFrame:
+    if "updates_store" not in st.session_state:
+        try:
+            st.session_state["updates_store"] = load_updates_from_gsheet()
+        except Exception as e:
+            st.error("Failed to read updates sheet.")
+            st.exception(e)
+            st.session_state["updates_store"] = pd.DataFrame(
+                columns=["row_key", "model", "status", "comments", "last_updated"]
+            )
+    return st.session_state["updates_store"]
 
-    existing_other_models = updates[updates["model"] != model_name].copy()
+def replace_model_updates(model_name: str, edited_df: pd.DataFrame) -> None:
+    updates = get_updates_store().copy()
+    other_models = updates[updates["model"] != model_name].copy()
 
-    current_model_updates = edited_df[["row_key", "Status", "Comments"]].copy()
-    current_model_updates = current_model_updates.rename(
-        columns={"Status": "status", "Comments": "comments"}
-    )
-    current_model_updates["model"] = model_name
-    current_model_updates["last_updated"] = datetime.now(timezone.utc).isoformat()
+    current = edited_df[["row_key", "Status", "Comments"]].copy()
+    current = current.rename(columns={"Status": "status", "Comments": "comments"})
+    current["model"] = model_name
+    current["last_updated"] = datetime.now(timezone.utc).isoformat()
 
-    merged = pd.concat([existing_other_models, current_model_updates], ignore_index=True)
+    merged = pd.concat([other_models, current], ignore_index=True)
     merged = merged.drop_duplicates(subset=["model", "row_key"], keep="last")
-    save_updates(merged)
 
-# ---------- Load pairing data ----------
-df_11 = pd.read_excel(EXCEL_FILE, sheet_name="Q1 1-1 Allowed Dir Only")
-df_12 = pd.read_excel(EXCEL_FILE, sheet_name="Q1 1-2 Allowed Dir Only")
+    st.session_state["updates_store"] = merged
+    save_updates_to_gsheet(merged)
+
+@st.cache_data
+def load_pairing_data(excel_file: str):
+    df_11 = pd.read_excel(excel_file, sheet_name="Q1 1-1 Allowed Dir Only")
+    df_12 = pd.read_excel(excel_file, sheet_name="Q1 1-2 Allowed Dir Only")
+    return df_11, df_12
+
+df_11, df_12 = load_pairing_data(EXCEL_FILE)
 
 REMOVE_PATTERNS = [
     "full stack developer intern",
@@ -179,7 +192,6 @@ for prefix in ["IC1", "IC2"]:
 
 STATUS_OPTIONS = ["", "Scheduled", "Done", "Cancelled"]
 
-# ---------- Header ----------
 st.markdown('<div class="main-title">Cross-functional Skip-Level Meeting Pairings</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="sub-title">Search by IC or Director, track meeting progress, and add comments in one place.</div>',
@@ -198,10 +210,10 @@ with col2:
 
 st.markdown("---")
 
-# ---------- Helpers ----------
 def merge_updates(results: pd.DataFrame, model_name: str) -> pd.DataFrame:
-    updates = load_updates()
+    updates = get_updates_store()
     updates_model = updates[updates["model"] == model_name].copy()
+
     if updates_model.empty:
         results["Comments"] = ""
         results["Status"] = ""
@@ -297,7 +309,6 @@ else:
 st.markdown("---")
 st.subheader("Pairing Results")
 
-# ---------- Results ----------
 if name:
     if model == "1:1 Model":
         results = df_11[
@@ -346,18 +357,23 @@ if name:
                 key="editor_11",
             )
 
-            if st.button("Save 1:1 updates"):
-                upsert_updates("1:1", edited)
-                st.success("Saved.")
-                st.rerun()
+            action_col1, action_col2 = st.columns([1, 1])
 
-            export_df = edited.drop(columns=["row_key"])
-            st.download_button(
-                "Download current 1:1 results as CSV",
-                export_df.to_csv(index=False).encode("utf-8"),
-                file_name="skip_level_pairings_1_1.csv",
-                mime="text/csv",
-            )
+            with action_col1:
+                if st.button("Save 1:1 updates", use_container_width=True):
+                    replace_model_updates("1:1", edited)
+                    st.success("Saved.")
+                    st.rerun()
+
+            with action_col2:
+                export_df = edited.drop(columns=["row_key"])
+                st.download_button(
+                    "Download current 1:1 results as CSV",
+                    export_df.to_csv(index=False).encode("utf-8"),
+                    file_name="skip_level_pairings_1_1.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
     else:
         results = df_12[
@@ -413,17 +429,22 @@ if name:
                 key="editor_12",
             )
 
-            if st.button("Save 1:2 updates"):
-                upsert_updates("1:2", edited)
-                st.success("Saved.")
-                st.rerun()
+            action_col1, action_col2 = st.columns([1, 1])
 
-            export_df = edited.drop(columns=["row_key"])
-            st.download_button(
-                "Download current 1:2 results as CSV",
-                export_df.to_csv(index=False).encode("utf-8"),
-                file_name="skip_level_pairings_1_2.csv",
-                mime="text/csv",
-            )
+            with action_col1:
+                if st.button("Save 1:2 updates", use_container_width=True):
+                    replace_model_updates("1:2", edited)
+                    st.success("Saved.")
+                    st.rerun()
+
+            with action_col2:
+                export_df = edited.drop(columns=["row_key"])
+                st.download_button(
+                    "Download current 1:2 results as CSV",
+                    export_df.to_csv(index=False).encode("utf-8"),
+                    file_name="skip_level_pairings_1_2.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 else:
     st.info("Search for an employee name to view their pairing details.")
